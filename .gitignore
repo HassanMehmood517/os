@@ -1,0 +1,6 @@
+# compiled files (rebuild them with "make")
+*.o
+*.run
+lab*/solution/q*
+!lab*/solution/q*.c
+!lab*/solution/q*.h
