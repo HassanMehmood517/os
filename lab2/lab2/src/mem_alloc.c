@@ -63,11 +63,18 @@ static mem_pool_t standard_pool_1025_and_above = {
     .max_req_size = SIZE_MAX,
     .pool_type = STANDARD_POOL};
 
+/* Safety check (bonus): count allocations and frees to detect memory leaks */
+static long nb_alloc = 0;
+static long nb_free  = 0;
+
 /* This function is automatically called upon the termination of a process. */
 void run_at_exit(void)
 {
     fprintf(stderr, "YEAH B-)\n");
-    /* You are encouraged to insert more useful code ... */
+    /* Safety check: memory leak = some blocks were allocated but never freed */
+    if (nb_alloc != nb_free)
+        fprintf(stderr, "WARNING: memory leak: %ld block(s) allocated but never freed\n",
+                nb_alloc - nb_free);
 }
 
 /* 
@@ -180,6 +187,7 @@ void *memory_alloc(size_t size)
     }
     else
     {
+        nb_alloc++;
         print_alloc_info(alloc_addr, size);
     }
     debug_printf("return %p\n", alloc_addr);
@@ -196,6 +204,14 @@ void memory_free(void *p)
 
     debug_printf("enter p = %p\n", p);
     i = find_pool_from_address(p);
+
+    /* Safety check: the address is not in any pool -> wrong free(), ignore it */
+    if (i < 0)
+    {
+        fprintf(stderr, "WARNING: free(%p): address not managed by the allocator, ignored\n", p);
+        return;
+    }
+    nb_free++;
 
     switch (mem_pools[i].pool_type)
     {
@@ -234,10 +250,74 @@ size_t memory_get_allocated_block_size(void *addr)
     return res;
 }
 
+/*
+ * Step 3: display the state of the memory.
+ * To keep the output readable, we do not print one character per BYTE:
+ *   - fast pools : one character per BLOCK ('X' = allocated, '.' = free),
+ *                  64 blocks per line.
+ *   - standard pool: one character per 64 BYTES of the pool, plus the list
+ *                  of blocks in address order: [X size] or [. size]
+ *                  (size = payload size, without header and footer).
+ */
 void print_mem_state(void)
 {
-    /* TO BE IMPLEMENTED */
-    printf("Please, implement me!\n");
+    for (int i = 0; i < NB_MEM_POOLS; i++)
+    {
+        mem_pool_t *p = &mem_pools[i];
+        size_t total = p->total_pool_size;
+        printf("%s:\n", p->pool_name);
+
+        if (p->pool_type == FAST_POOL)
+        {
+            size_t bs = p->max_req_size;
+            size_t nb = total / bs;
+            char *map = o_malloc ? o_malloc(nb) : malloc(nb);
+            /* everything is allocated, except the blocks found in the free list */
+            for (size_t k = 0; k < nb; k++)
+                map[k] = 'X';
+            for (mem_fast_free_block_t *b = p->first_free; b != NULL; b = b->next)
+                map[((char *)b - (char *)p->start_addr) / bs] = '.';
+            for (size_t k = 0; k < nb; k++)
+            {
+                if (k % 64 == 0) printf("  [");
+                putchar(map[k]);
+                if (k % 64 == 63 || k == nb - 1) printf("]\n");
+            }
+            if (o_free) o_free(map); else free(map);
+        }
+        else
+        {
+            /* walk all blocks using the headers (header + payload + footer) */
+            char *a = (char *)p->start_addr;
+            char *end = (char *)p->end_addr + 1;
+            size_t hf = sizeof(mem_std_block_header_footer_t);
+#ifdef MEM_ALIGN_CONSTRAINT
+            if (MEM_ALIGN_CONSTRAINT > hf) hf = MEM_ALIGN_CONSTRAINT;  /* same rule as the standard pool */
+#endif
+            printf("  blocks:");
+            while (a < end)
+            {
+                mem_std_block_header_footer_t *h = (mem_std_block_header_footer_t *)a;
+                size_t sz = get_block_size(h);
+                printf(" [%c %lu]", is_block_used(h) ? 'X' : '.', ULONG(sz));
+                a += sz + 2 * hf;
+            }
+            printf("\n  map (1 char = 64 bytes): [");
+            a = (char *)p->start_addr;
+            size_t pos = 0;
+            while (a < end)
+            {
+                mem_std_block_header_footer_t *h = (mem_std_block_header_footer_t *)a;
+                size_t len = get_block_size(h) + 2 * hf;
+                char c = is_block_used(h) ? 'X' : '.';
+                for (size_t k = pos / 64; k < (pos + len) / 64; k++)
+                    putchar(c);
+                pos += len;
+                a += len;
+            }
+            printf("]\n");
+        }
+    }
 }
 
 void print_free_info(void *addr)
